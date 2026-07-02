@@ -313,7 +313,25 @@
       <div class="mt-4 sm:mt-6 pt-3 border-t border-purple-400/20 flex justify-between text-xs text-purple-400/50 mono-text"><span id="right-records">REGISTROS: 0</span> <span>CANAL: LUN-002</span>
       </div>
      </div>
-    </div><!-- Bottom Status Bar -->
+    </div>
+
+    <!-- Calendario interactivo: permite añadir nombres dando clic en los días -->
+    <div id="calendar-panel" class="mt-6 data-panel rounded-lg p-4 sm:p-6 mono-text no-print">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="title-font text-sm text-cyan-300">Calendario Transmision</h3>
+        <div class="flex items-center gap-2">
+          <button id="cal-prev" class="control-btn" type="button">◀</button>
+          <div id="calendar-month-label" class="text-xs text-cyan-200"></div>
+          <button id="cal-next" class="control-btn" type="button">▶</button>
+        </div>
+      </div>
+      <div id="calendar-grid" class="grid grid-cols-7 gap-1 text-xs text-cyan-100">
+        <!-- cells rendered by JS -->
+      </div>
+      <div class="mt-2 text-xs text-cyan-300">Haz clic en un día para agregar un nombre; se guardará en el almacenamiento local.</div>
+    </div>
+
+    <!-- Bottom Status Bar -->
     <div class="mt-6 sm:mt-8 text-center mono-text text-xs text-cyan-400/40">
      <div class="inline-flex items-center gap-2 sm:gap-4 flex-wrap justify-center"><span>◇ PROTOCOLO: HOLOGRAM-V3</span> <span class="text-purple-400/40">|</span> <span id="sync-status">◇ ÚLTIMA SYNC: 2025.03.01</span> <span class="text-purple-400/40">|</span> <span>◇ NODO: MX-CENTRAL</span>
      </div>
@@ -353,28 +371,22 @@
     const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
     const monthAbbreviations = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
 
-    const initialScheduleByMonth = {
-      '2025-03': {
-        year: 2025,
-        monthIndex: 2,
-        sundayAssignments: ['Ale / Adrian 📷', 'Panchito / Carlos 📷', 'Emmanuel M / Ale 📷', 'Panchito / Carlos', 'Panchito / Ale 📷'],
-        mondayAssignments: ['Emmanuel R', 'Emmanuel R', 'Emmanuel R', 'Emmanuel R', 'Emmanuel R']
-      },
-      '2025-04': {
-        year: 2025,
-        monthIndex: 3,
-        sundayAssignments: ['Por definir', 'Por definir', 'Por definir', 'Por definir'],
-        mondayAssignments: ['Por definir', 'Por definir', 'Por definir', 'Por definir']
-      }
-    };
+    // inicial sin meses precargados — los meses se crean según la fecha actual o importación
+    const initialScheduleByMonth = {};
+
+    // determinar mes inicial según la fecha actual
+    const _today = new Date();
+    const _initialMonthKey = `${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, '0')}`;
 
     let appState = {
       scheduleByMonth: JSON.parse(JSON.stringify(initialScheduleByMonth)),
-      currentMonthKey: '2025-03',
+      currentMonthKey: _initialMonthKey,
       viewFilter: 'all',
       searchQuery: '',
       rotationPool: [],
-      history: []
+      history: [],
+      // calendarAssignments stores arrays of names keyed by 'YYYY-MM-DD'
+      calendarAssignments: {}
     };
 
     function saveState() {
@@ -644,6 +656,8 @@
       updatePanelVisibility();
       renderWarnings(data);
       saveState();
+      // actualizar el calendario asociado al mes actual
+      try { renderCalendar(); } catch (e) { /* ignore if function not yet defined */ }
     }
 
     function monthNameToIndex(name) {
@@ -1013,6 +1027,25 @@
     }
 
     loadState();
+    // asegurar que el mes actual exista en scheduleByMonth (usar 2026 si estamos en 2026)
+    (function ensureCurrentMonthExists() {
+      const currentKey = appState.currentMonthKey || _initialMonthKey;
+      if (!appState.scheduleByMonth[currentKey]) {
+        const [y, m] = currentKey.split('-').map(Number);
+        const monthIndex = m - 1;
+        const sundayCount = getDatesForWeekday(y, monthIndex, 0).length;
+        const mondayCount = getDatesForWeekday(y, monthIndex, 1).length;
+        appState.scheduleByMonth[currentKey] = {
+          year: y,
+          monthIndex,
+          sundayAssignments: Array.from({ length: sundayCount }, () => 'Por definir'),
+          mondayAssignments: Array.from({ length: mondayCount }, () => 'Por definir')
+        };
+      }
+      // Si la clave actual es diferente del que cargó localStorage, usar la actual
+      appState.currentMonthKey = currentKey;
+    })();
+
     updateMonthSelectOptions();
     renderMonth(appState.currentMonthKey);
     renderHistory();
@@ -1117,6 +1150,104 @@
         selection.addRange(range);
       }
     });
+
+    // --- Calendario interactivo: funciones auxiliares ---
+    function formatDateKey(date) {
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    }
+
+    function renderCalendar() {
+      const grid = document.getElementById('calendar-grid');
+      const label = document.getElementById('calendar-month-label');
+      if (!grid || !label) return;
+
+      const key = appState.currentMonthKey || Object.keys(appState.scheduleByMonth)[0];
+      if (!key) return;
+      const [yearStr, monthStr] = String(key).split('-');
+      const year = Number(yearStr);
+      const monthIndex = Number(monthStr) - 1;
+      const first = new Date(year, monthIndex, 1);
+      const last = new Date(year, monthIndex + 1, 0);
+
+      label.textContent = `${monthNames[monthIndex]} ${year}`;
+
+      const todayKey = formatDateKey(new Date());
+
+      // Weekday headers
+      const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+      const cells = [];
+      cells.push(...weekdays.map(w => `<div class="text-center text-xs font-semibold text-cyan-300">${w}</div>`));
+
+      // leading empty cells
+      for (let i = 0; i < first.getDay(); i += 1) {
+        cells.push('<div></div>');
+      }
+
+      for (let day = 1; day <= last.getDate(); day += 1) {
+        const dateObj = new Date(year, monthIndex, day);
+        const dateKey = formatDateKey(dateObj);
+        const names = Array.isArray(appState.calendarAssignments[dateKey]) ? appState.calendarAssignments[dateKey] : [];
+        const namesHtml = names.map(n => `<div class="text-[11px] text-cyan-100/80 truncate">${escapeHtml(n)}</div>`).join('');
+
+        const isToday = dateKey === todayKey;
+        const todayClass = isToday ? 'ring-2 ring-cyan-300/50 bg-slate-900/95' : '';
+        cells.push(`
+          <div class="p-2 min-h-[56px] bg-slate-950/60 border border-cyan-400/10 rounded cursor-pointer hover:bg-slate-900/80 ${todayClass}" data-date="${dateKey}">
+            <div class="flex items-center justify-between mb-1">
+              <div class="text-[12px] font-semibold text-cyan-200">${day}</div>
+              <div class="text-[11px] text-cyan-300/70">${monthAbbreviations[monthIndex]}</div>
+            </div>
+            <div class="space-y-0.5">${namesHtml}</div>
+          </div>
+        `);
+      }
+
+      grid.innerHTML = cells.join('');
+
+      // attach click handlers for each day cell
+      grid.querySelectorAll('[data-date]').forEach(el => {
+        el.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const dateKey = el.dataset.date;
+          const name = window.prompt(`Agregar nombre para ${dateKey}:`);
+          if (!name) return;
+          addNameToDate(dateKey, name.trim());
+        });
+      });
+    }
+
+    function addNameToDate(dateKey, name) {
+      if (!name) return;
+      if (!appState.calendarAssignments[dateKey]) appState.calendarAssignments[dateKey] = [];
+      appState.calendarAssignments[dateKey].push(name);
+      pushHistory(`Nombre agregado en ${dateKey}: ${name}`);
+      saveState();
+      renderCalendar();
+    }
+
+    function changeCalendarMonth(offset) {
+      const current = appState.currentMonthKey || Object.keys(appState.scheduleByMonth)[0];
+      if (!current) return;
+      const [y, m] = current.split('-').map(Number);
+      const d = new Date(y, (m - 1) + offset, 1);
+      const newKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      // if month not present in scheduleByMonth, still allow calendar view
+      if (!appState.scheduleByMonth[newKey]) {
+        appState.scheduleByMonth[newKey] = {
+          year: d.getFullYear(),
+          monthIndex: d.getMonth(),
+          sundayAssignments: [],
+          mondayAssignments: []
+        };
+      }
+      renderMonth(newKey);
+    }
+
+    const calPrevBtn = document.getElementById('cal-prev');
+    const calNextBtn = document.getElementById('cal-next');
+    if (calPrevBtn) calPrevBtn.addEventListener('click', () => changeCalendarMonth(-1));
+    if (calNextBtn) calNextBtn.addEventListener('click', () => changeCalendarMonth(1));
+
 
     document.addEventListener('keydown', (event) => {
       if (!event.target.classList || !event.target.classList.contains('editable-assignee')) {
